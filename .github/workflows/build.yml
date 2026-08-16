@@ -133,7 +133,15 @@ jobs:
         run: |
           set -eux
 
-          fakeroot debian/rules binary-arch
+          # debian.asahi-arm/config/annotations хранит "эталонные" версии
+          # rustc/LLVM/bindgen из окружения самих мейнтейнеров Asahi/Canonical.
+          # Они никогда не совпадут точь-в-точь с тем, что реально лежит в
+          # архиве questing + PPA на момент сборки в стороннем CI — версии
+          # дрейфуют в обе стороны (то новее, то старее). do_skip_checks=true
+          # отключает именно эту строгую сверку config <-> annotations
+          # (см. debian/rules.d/2-binary-arch.mk:45), что и предусмотрено
+          # мейнтейнерами для неофициальных/mainline-сборок.
+          fakeroot debian/rules binary-arch do_skip_checks=true
 
       - name: Show generated packages
         if: always()
