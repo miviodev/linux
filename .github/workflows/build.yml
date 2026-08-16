@@ -1,4 +1,4 @@
-name: Build Ubuntu Asahi kernel packages
+name: Build Ubuntu Asahi kernel
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-25.10-arm
+    runs-on: ubuntu-26.04-arm
 
     env:
       DEBIAN_FRONTEND: noninteractive
@@ -21,119 +21,219 @@ jobs:
           ref: master
           fetch-depth: 1
 
-      - name: Show build environment
+      - name: Install LXD
         run: |
           set -eux
-
-          echo "=== OS ==="
-          cat /etc/os-release
-
-          echo "=== Architecture ==="
-          dpkg --print-architecture
-          dpkg-architecture -qDEB_HOST_ARCH
-          uname -m
-
-          echo "=== Kernel ==="
-          uname -a
-
-      - name: Add Ubuntu Asahi repository
-        run: |
-          set -eux
-
-          sudo tee /etc/apt/sources.list.d/ubuntu-asahi.list > /dev/null <<'EOF'
-          deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu resolute main
-          deb-src [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu resolute main
-          EOF
 
           sudo apt-get update
+          sudo apt-get install -y lxd
 
-      - name: Install Debian build tools
+          sudo usermod -aG lxd "$USER"
+
+          # GitHub runner shell не подхватит новую группу автоматически.
+          # Используем sg, чтобы команды LXD выполнялись с группой lxd.
+          sudo lxd waitready
+
+      - name: Initialize LXD
         run: |
           set -eux
 
-          sudo apt-get install -y \
-            build-essential \
-            debhelper \
-            devscripts \
-            equivs \
-            fakeroot \
-            dpkg-dev \
-            ca-certificates \
-            git
+          sudo lxd init --auto
+
+      - name: Launch Ubuntu 25.10 ARM64 container
+        run: |
+          set -eux
+
+          sudo lxc remote add \
+            --protocol simplestreams \
+            ubuntu \
+            https://cloud-images.ubuntu.com/releases/ \
+            || true
+
+          sudo lxc launch ubuntu:questing kernel-build
+
+          sudo lxc config set kernel-build security.nesting true
+          sudo lxc config set kernel-build security.privileged true
+
+          # Даём контейнеру достаточно места под kernel build.
+          sudo lxc config device override kernel-build root size=40GiB
+
+          sudo lxc exec kernel-build -- bash -c '
+            set -eux
+            cat /etc/os-release
+            dpkg --print-architecture
+            uname -m
+          '
+
+      - name: Copy source into Ubuntu 25.10
+        run: |
+          set -eux
+
+          sudo tar \
+            --exclude=.git \
+            -C . \
+            -cf - . \
+          | sudo lxc exec kernel-build -- tar -C /root -xf -
+
+      - name: Prepare Ubuntu 25.10
+        run: |
+          set -eux
+
+          sudo lxc exec kernel-build -- bash -c '
+            set -eux
+
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update
+
+            apt-get install -y \
+              build-essential \
+              ca-certificates \
+              curl \
+              debhelper \
+              devscripts \
+              dpkg-dev \
+              equivs \
+              fakeroot \
+              git \
+              sudo
+
+            tee /etc/apt/sources.list.d/ubuntu-asahi.list > /dev/null <<EOF
+          deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu questing main
+          deb-src [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu questing main
+          EOF
+
+            apt-get update
+          '
 
       - name: Prepare Debian packaging
         run: |
           set -eux
 
-          # Ubuntu kernel packaging keeps the active changelog
-          # in the selected DEBIAN tree (debian.asahi-arm).
-          # dh_installchangelogs expects debian/changelog.
-          cp debian.asahi-arm/changelog debian/changelog
+          sudo lxc exec kernel-build -- bash -c '
+            set -eux
+            cd /root
 
-      - name: Generate Debian control
+            cp debian.asahi-arm/changelog debian/changelog
+
+            debian/rules debian/control
+          '
+
+      - name: Install kernel build dependencies
         run: |
           set -eux
 
-          debian/rules debian/control
+          sudo lxc exec kernel-build -- bash -c '
+            set -eux
+            cd /root
 
-          echo "=== Generated source package metadata ==="
-          head -80 debian/control
+            mk-build-deps \
+              --install \
+              --remove \
+              --tool="apt-get -y --no-install-recommends" \
+              debian/control
+          '
 
-      - name: Install all build dependencies
+      - name: Show toolchain
         run: |
           set -eux
 
-          sudo mk-build-deps \
-            --install \
-            --remove \
-            --tool='apt-get -y --no-install-recommends' \
-            debian/control
+          sudo lxc exec kernel-build -- bash -c '
+            set -x
 
-      - name: Verify build dependencies
+            echo "=== OS ==="
+            cat /etc/os-release
+
+            echo "=== ARCH ==="
+            dpkg --print-architecture
+            uname -m
+
+            echo "=== RUST ==="
+            rustc --version || true
+            rustfmt --version || true
+
+            echo "=== CLANG ==="
+            clang --version || true
+            clang-21 --version || true
+
+            echo "=== LLVM ==="
+            llc --version || true
+            llc-21 --version || true
+          '
+
+      - name: Check build dependencies
         run: |
           set -eux
 
-          dpkg-checkbuilddeps -B debian/control
+          sudo lxc exec kernel-build -- bash -c '
+            set -eux
+            cd /root
+            dpkg-checkbuilddeps -B debian/control
+          '
 
-      - name: Build ARM64 kernel packages
+      - name: Build kernel packages
         run: |
           set -eux
 
-          fakeroot debian/rules binary-arch
+          sudo lxc exec kernel-build -- bash -c '
+            set -eux
+            cd /root
 
-      - name: Show generated packages
-        if: always()
-        run: |
-          echo "=== Generated Debian packages ==="
+            fakeroot debian/rules binary-arch
+          '
 
-          find .. -maxdepth 1 -type f \
-            \( \
-              -name '*.deb' \
-              -o -name '*.changes' \
-              -o -name '*.buildinfo' \
-            \) \
-            -print | sort
-
-      - name: Collect packages
-        if: success()
+      - name: Collect Debian packages
         run: |
           set -eux
 
           mkdir -p packages
 
-          find .. -maxdepth 1 -type f \
-            \( \
-              -name '*.deb' \
-              -o -name '*.changes' \
-              -o -name '*.buildinfo' \
-            \) \
-            -exec cp -v {} packages/ \;
+          sudo lxc exec kernel-build -- bash -c '
+            cd /root
 
-          echo "=== Packages to upload ==="
-          ls -lah packages
+            find .. -maxdepth 1 -type f \
+              \( \
+                -name "*.deb" \
+                -o -name "*.changes" \
+                -o -name "*.buildinfo" \
+              \) \
+              -print
+          '
+
+          sudo lxc file pull -r \
+            kernel-build/root/../ \
+            /tmp/kernel-output \
+            2>/dev/null || true
+
+          # Надёжнее собрать архив внутри контейнера.
+          sudo lxc exec kernel-build -- bash -c '
+            cd /root
+            mkdir -p /tmp/packages
+
+            find .. -maxdepth 1 -type f \
+              \( \
+                -name "*.deb" \
+                -o -name "*.changes" \
+                -o -name "*.buildinfo" \
+              \) \
+              -exec cp -v {} /tmp/packages/ \;
+
+            tar -C /tmp/packages -czf /tmp/kernel-packages.tar.gz .
+          '
+
+          sudo lxc file pull \
+            kernel-build/tmp/kernel-packages.tar.gz \
+            packages/kernel-packages.tar.gz
+
+          tar -xzf packages/kernel-packages.tar.gz \
+            -C packages
+
+          rm packages/kernel-packages.tar.gz
+
+          echo "=== PACKAGES ==="
+          find packages -type f -print | sort
 
       - name: Upload Debian packages
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ubuntu-asahi-kernel-arm64
