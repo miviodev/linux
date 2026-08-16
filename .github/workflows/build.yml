@@ -15,18 +15,14 @@ jobs:
             /usr/local/.ghcup /opt/hostedtoolcache
            sudo apt-get clean
           df -h
- 
+      - name: pwd
+        run: |
+         pwd
+         ls -la
       - name: Install build deps
         run: |
           cd debian
           sudo apt-get update
-          echo "deb-src http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/deb-src.list
-          echo "deb-src http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/deb-src.list
-          sudo apt-get update
-          sudo apt-get install -y fakeroot dpkg-dev build-essential libncurses-dev \
-            bison flex libssl-dev libelf-dev dwarves bc rsync kmod cpio devscripts \
-            equivs libudev-dev libtraceevent-dev libtracefs-dev \
-            libbpf-dev pkg-config
           sudo mk-build-deps control -i
       - name: Patch macsmc power-off
         run: |
