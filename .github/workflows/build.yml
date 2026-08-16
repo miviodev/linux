@@ -13,38 +13,46 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
+      DEB_BUILD_OPTIONS: parallel=4,nocheck
+      RUSTUP_HOME: /opt/rustup
+      CARGO_HOME: /opt/cargo
 
     steps:
-      - name: Checkout
+      - name: Checkout kernel
         uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 1
 
-      - name: Show source revision
+      - name: Show source version
         run: |
-          echo "Kernel source:"
+          echo "Commit:"
           git log -1 --oneline
+
           echo
-          echo "Kernel version:"
-          make -s kernelversion || true
+          echo "Kernel:"
+          make -s kernelversion
+
           echo
-          echo "Asahi packaging:"
+          echo "Debian flavour:"
           cat debian/debian.env
-          cat debian.asahi-arm/variants
+          echo
+          cat debian.asahi-arm/rules.d/arm64.mk
 
       - name: Enable source repositories
         run: |
-          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo sed -i \
+            's/^Types: deb$/Types: deb deb-src/' \
+            /etc/apt/sources.list.d/ubuntu.sources
+
           sudo apt-get update
 
-      - name: Install build tools
+      - name: Install base build dependencies
         run: |
           sudo apt-get install -y \
             build-essential \
             fakeroot \
             devscripts \
-            equivs \
             dpkg-dev \
             debhelper \
             bc \
@@ -70,40 +78,129 @@ jobs:
             xz-utils \
             zstd \
             lz4 \
-            ccache
+            ccache \
+            clang \
+            llvm \
+            lld
 
-      - name: Generate Debian control file
+      # Ubuntu 24.04 ships LLVM 18, while the current Ubuntu Asahi
+      # packaging expects LLVM/Clang 21.
+      - name: Install LLVM 21
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
+          chmod +x /tmp/llvm.sh
+          sudo /tmp/llvm.sh 21
+
+          sudo apt-get install -y \
+            clang-21 \
+            llvm-21 \
+            llvm-21-dev \
+            libclang-21-dev \
+            lld-21
+
+          echo "/usr/lib/llvm-21/bin" >> "$GITHUB_PATH"
+
+          clang-21 --version
+          llvm-config-21 --version
+          ld.lld-21 --version
+
+      # The packaging requires rustc >= 1.82.
+      # Ubuntu 24.04's rustc is too old, so use rustup.
+      - name: Install Rust
+        run: |
+          sudo mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
+          sudo chown -R "$USER:$USER" "$RUSTUP_HOME" "$CARGO_HOME"
+
+          curl --proto '=https' \
+               --tlsv1.2 \
+               -sSf https://sh.rustup.rs \
+            | sh -s -- \
+                -y \
+                --default-toolchain stable \
+                --profile minimal
+
+          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
+
+          "$CARGO_HOME/bin/rustc" --version
+          "$CARGO_HOME/bin/rustfmt" --version
+
+      - name: Install Rust build helpers
+        run: |
+          cargo install bindgen-cli --locked
+
+          echo
+          bindgen --version
+
+      - name: Generate Debian control
         run: |
           debian/rules debian/control
 
-      - name: Install Ubuntu kernel build dependencies
+          echo
+          echo "Build dependencies:"
+          sed -n '/^Build-Depends:/,/^[^ ]/p' debian/control || true
+
+      - name: Show Debian build environment
         run: |
-          sudo apt-get build-dep -y .
+          dpkg --print-architecture
+          dpkg-architecture
+
+          echo
+          echo "gcc:"
+          gcc --version | head -n 1
+
+          echo
+          echo "clang:"
+          clang-21 --version | head -n 1
+
+          echo
+          echo "rustc:"
+          rustc --version
+
+          echo
+          echo "rustfmt:"
+          rustfmt --version
+
+          echo
+          echo "bindgen:"
+          bindgen --version
 
       - name: Build Debian packages
-        env:
-          DEB_BUILD_OPTIONS: nocheck
         run: |
           fakeroot debian/rules binary
 
-      - name: List generated packages
+      - name: Show generated packages
+        if: always()
         run: |
-          echo "Generated Debian packages:"
-          find .. -maxdepth 1 -type f -name '*.deb' -print | sort
+          echo "Generated files:"
+          find .. -maxdepth 1 -type f \
+            \( \
+              -name '*.deb' -o \
+              -name '*.changes' -o \
+              -name '*.buildinfo' -o \
+              -name '*.dsc' \
+            \) \
+            -print | sort
 
-      - name: Collect packages
+      - name: Collect Debian packages
+        if: success()
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/packages"
+          mkdir -p packages
 
           find .. -maxdepth 1 -type f \
-            \( -name '*.deb' -o -name '*.changes' -o -name '*.buildinfo' \) \
-            -exec cp -v {} "$GITHUB_WORKSPACE/packages/" \;
+            \( \
+              -name '*.deb' -o \
+              -name '*.changes' -o \
+              -name '*.buildinfo' \
+              -o -name '*.dsc' \
+            \) \
+            -exec cp -v {} packages/ \;
 
           echo
-          echo "Packages:"
-          ls -lah "$GITHUB_WORKSPACE/packages"
+          echo "Packages to upload:"
+          ls -lah packages
 
       - name: Upload Debian packages
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ubuntu-asahi-kernel-debs
