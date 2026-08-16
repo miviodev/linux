@@ -1,4 +1,4 @@
-name: Build Ubuntu Asahi kernel
+name: Build Ubuntu Asahi kernel packages
 
 on:
   workflow_dispatch:
@@ -8,10 +8,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-24.04-arm
-
-    container:
-      image: ubuntu:resolute
+    runs-on: ubuntu-26.04-arm
 
     env:
       DEBIAN_FRONTEND: noninteractive
@@ -24,61 +21,104 @@ jobs:
           ref: master
           fetch-depth: 1
 
-      - name: Configure repositories
+      - name: Show build environment
         run: |
-          cat > /etc/apt/sources.list.d/ubuntu.sources <<'EOF'
-          Types: deb deb-src
-          URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: resolute resolute-updates resolute-security
-          Components: main universe restricted multiverse
-          EOF
+          set -eux
 
-          cat > /etc/apt/sources.list.d/ubuntu-asahi.list <<'EOF'
+          echo "=== OS ==="
+          cat /etc/os-release
+
+          echo "=== Architecture ==="
+          dpkg --print-architecture
+          dpkg-architecture -qDEB_HOST_ARCH
+          uname -m
+
+          echo "=== Kernel ==="
+          uname -a
+
+      - name: Add Ubuntu Asahi repository
+        run: |
+          set -eux
+
+          sudo tee /etc/apt/sources.list.d/ubuntu-asahi.list > /dev/null <<'EOF'
           deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu resolute main
+          deb-src [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu resolute main
           EOF
 
-          apt-get update
+          sudo apt-get update
 
-      - name: Install build tools
+      - name: Install Debian build tools
         run: |
-          apt-get install -y \
+          set -eux
+
+          sudo apt-get install -y \
             build-essential \
+            debhelper \
             devscripts \
             equivs \
             fakeroot \
             dpkg-dev \
-            debhelper \
             ca-certificates \
             git
 
+      - name: Prepare Debian packaging
+        run: |
+          set -eux
+
+          # Ubuntu kernel packaging keeps the active changelog
+          # in the selected DEBIAN tree (debian.asahi-arm).
+          # dh_installchangelogs expects debian/changelog.
+          cp debian.asahi-arm/changelog debian/changelog
+
       - name: Generate Debian control
         run: |
+          set -eux
+
           debian/rules debian/control
 
-      - name: Show generated Build-Depends
-        run: |
-          sed -n '/^Build-Depends:/,/^[^ ]/p' debian/control || true
+          echo "=== Generated source package metadata ==="
+          head -80 debian/control
 
-      - name: Install build dependencies
+      - name: Install all build dependencies
         run: |
+          set -eux
+
           mk-build-deps \
             --install \
             --remove \
             --tool='apt-get -y --no-install-recommends' \
             debian/control
 
-      - name: Verify architecture
+      - name: Verify build dependencies
         run: |
-          dpkg --print-architecture
-          dpkg-architecture
-          uname -m
+          set -eux
 
-      - name: Build kernel packages
+          dpkg-checkbuilddeps -B debian/control
+
+      - name: Build ARM64 kernel packages
         run: |
+          set -eux
+
           fakeroot debian/rules binary-arch
 
-      - name: Collect packages
+      - name: Show generated packages
+        if: always()
         run: |
+          echo "=== Generated Debian packages ==="
+
+          find .. -maxdepth 1 -type f \
+            \( \
+              -name '*.deb' \
+              -o -name '*.changes' \
+              -o -name '*.buildinfo' \
+            \) \
+            -print | sort
+
+      - name: Collect packages
+        if: success()
+        run: |
+          set -eux
+
           mkdir -p packages
 
           find .. -maxdepth 1 -type f \
@@ -89,13 +129,14 @@ jobs:
             \) \
             -exec cp -v {} packages/ \;
 
-          echo "=== Packages ==="
+          echo "=== Packages to upload ==="
           ls -lah packages
 
       - name: Upload Debian packages
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-asahi-kernel
+          name: ubuntu-asahi-kernel-arm64
           path: packages/
           if-no-files-found: error
           retention-days: 30
