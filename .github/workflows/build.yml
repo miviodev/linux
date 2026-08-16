@@ -1,4 +1,4 @@
-name: Build Ubuntu Asahi kernel
+name: Build Ubuntu Asahi kernel packages
 
 on:
   workflow_dispatch:
@@ -10,230 +10,161 @@ jobs:
   build:
     runs-on: ubuntu-26.04-arm
 
+    # Собираем строго внутри Ubuntu 25.10 (questing), а не на хосте 26.04.
+    # Это критично: debian.asahi-arm/config/annotations фиксирует ожидаемые
+    # CONFIG_RUSTC_VERSION / CONFIG_RUSTC_LLVM_VERSION под тот rustc/rust-src,
+    # что лежат в PPA ubuntu-asahi именно для questing. Если собирать на
+    # хосте 26.04 (или добавить PPA под resolute), apt подтянет более новый
+    # системный rustc, чем тот rust-src, под который собран Asahi PPA —
+    # rustc и sysroot core-библиотеки разъедутся по версии, и
+    # scripts/rust_is_available.sh перестанет находить core, из-за чего
+    # check-config молча схлопывает CONFIG_RUST_IS_AVAILABLE y -> -
+    # (и вместе с ним отваливается asahi DRM-драйвер, он на Rust).
+    container:
+      image: ubuntu:questing
+
     env:
       DEBIAN_FRONTEND: noninteractive
       DEB_BUILD_OPTIONS: parallel=4
 
     steps:
+      - name: Install git (needed for checkout inside minimal container)
+        run: |
+          set -eux
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 1
 
-      - name: Install LXD
+      - name: Show build environment
         run: |
           set -eux
 
-          sudo apt-get update
-          sudo apt-get install -y lxd
+          echo "=== OS ==="
+          cat /etc/os-release
 
-          sudo usermod -aG lxd "$USER"
+          echo "=== Architecture ==="
+          dpkg --print-architecture
+          dpkg-architecture -qDEB_HOST_ARCH
+          uname -m
 
-          # GitHub runner shell не подхватит новую группу автоматически.
-          # Используем sg, чтобы команды LXD выполнялись с группой lxd.
-          sudo lxd waitready
+          echo "=== Kernel (host, не гостевой) ==="
+          uname -a
 
-      - name: Initialize LXD
+      - name: Add Ubuntu Asahi repository (questing, совпадает с образом контейнера)
         run: |
           set -eux
 
-          sudo lxd init --auto
-
-      - name: Launch Ubuntu 25.10 ARM64 container
-        run: |
-          set -eux
-
-          sudo lxc remote add \
-            --protocol simplestreams \
-            ubuntu \
-            https://cloud-images.ubuntu.com/releases/ \
-            || true
-
-          sudo lxc launch ubuntu:questing kernel-build
-
-          sudo lxc config set kernel-build security.nesting true
-          sudo lxc config set kernel-build security.privileged true
-
-          # Даём контейнеру достаточно места под kernel build.
-          sudo lxc config device override kernel-build root size=40GiB
-
-          sudo lxc exec kernel-build -- bash -c '
-            set -eux
-            cat /etc/os-release
-            dpkg --print-architecture
-            uname -m
-          '
-
-      - name: Copy source into Ubuntu 25.10
-        run: |
-          set -eux
-
-          sudo tar \
-            --exclude=.git \
-            -C . \
-            -cf - . \
-          | sudo lxc exec kernel-build -- tar -C /root -xf -
-
-      - name: Prepare Ubuntu 25.10
-        run: |
-          set -eux
-
-          sudo lxc exec kernel-build -- bash -c '
-            set -eux
-
-            export DEBIAN_FRONTEND=noninteractive
-
-            apt-get update
-
-            apt-get install -y \
-              build-essential \
-              ca-certificates \
-              curl \
-              debhelper \
-              devscripts \
-              dpkg-dev \
-              equivs \
-              fakeroot \
-              git \
-              sudo
-
-            tee /etc/apt/sources.list.d/ubuntu-asahi.list > /dev/null <<EOF
+          tee /etc/apt/sources.list.d/ubuntu-asahi.list > /dev/null <<'EOF'
           deb [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu questing main
           deb-src [trusted=yes] https://ppa.launchpadcontent.net/ubuntu-asahi/ubuntu-asahi/ubuntu questing main
           EOF
 
-            apt-get update
-          '
+          apt-get update
+
+      - name: Install Debian build tools
+        run: |
+          set -eux
+
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            debhelper \
+            devscripts \
+            equivs \
+            fakeroot \
+            dpkg-dev \
+            git
 
       - name: Prepare Debian packaging
         run: |
           set -eux
 
-          sudo lxc exec kernel-build -- bash -c '
-            set -eux
-            cd /root
+          # Ubuntu kernel packaging keeps the active changelog
+          # in the selected DEBIAN tree (debian.asahi-arm).
+          # dh_installchangelogs expects debian/changelog.
+          cp debian.asahi-arm/changelog debian/changelog
 
-            cp debian.asahi-arm/changelog debian/changelog
-
-            debian/rules debian/control
-          '
-
-      - name: Install kernel build dependencies
+      - name: Generate Debian control
         run: |
           set -eux
 
-          sudo lxc exec kernel-build -- bash -c '
-            set -eux
-            cd /root
+          debian/rules debian/control
 
-            mk-build-deps \
-              --install \
-              --remove \
-              --tool="apt-get -y --no-install-recommends" \
-              debian/control
-          '
+          echo "=== Generated source package metadata ==="
+          head -80 debian/control
 
-      - name: Show toolchain
+      - name: Install all build dependencies
         run: |
           set -eux
 
-          sudo lxc exec kernel-build -- bash -c '
-            set -x
+          mk-build-deps \
+            --install \
+            --remove \
+            --tool='apt-get -y --no-install-recommends' \
+            debian/control
 
-            echo "=== OS ==="
-            cat /etc/os-release
-
-            echo "=== ARCH ==="
-            dpkg --print-architecture
-            uname -m
-
-            echo "=== RUST ==="
-            rustc --version || true
-            rustfmt --version || true
-
-            echo "=== CLANG ==="
-            clang --version || true
-            clang-21 --version || true
-
-            echo "=== LLVM ==="
-            llc --version || true
-            llc-21 --version || true
-          '
-
-      - name: Check build dependencies
+      - name: Verify build dependencies
         run: |
           set -eux
 
-          sudo lxc exec kernel-build -- bash -c '
-            set -eux
-            cd /root
-            dpkg-checkbuilddeps -B debian/control
-          '
+          dpkg-checkbuilddeps -B debian/control
 
-      - name: Build kernel packages
+      - name: Show toolchain versions (для сверки с debian.asahi-arm/config/annotations)
         run: |
           set -eux
 
-          sudo lxc exec kernel-build -- bash -c '
-            set -eux
-            cd /root
+          echo "=== RUST ==="
+          rustc --version || true
+          rustfmt --version || true
+          bindgen --version || true
 
-            fakeroot debian/rules binary-arch
-          '
+          echo "=== CLANG / LLVM ==="
+          clang --version || true
+          llvm-config --version || true
 
-      - name: Collect Debian packages
+      - name: Build ARM64 kernel packages
+        run: |
+          set -eux
+
+          fakeroot debian/rules binary-arch
+
+      - name: Show generated packages
+        if: always()
+        run: |
+          echo "=== Generated Debian packages ==="
+
+          find .. -maxdepth 1 -type f \
+            \( \
+              -name '*.deb' \
+              -o -name '*.changes' \
+              -o -name '*.buildinfo' \
+            \) \
+            -print | sort
+
+      - name: Collect packages
+        if: success()
         run: |
           set -eux
 
           mkdir -p packages
 
-          sudo lxc exec kernel-build -- bash -c '
-            cd /root
+          find .. -maxdepth 1 -type f \
+            \( \
+              -name '*.deb' \
+              -o -name '*.changes' \
+              -o -name '*.buildinfo' \
+            \) \
+            -exec cp -v {} packages/ \;
 
-            find .. -maxdepth 1 -type f \
-              \( \
-                -name "*.deb" \
-                -o -name "*.changes" \
-                -o -name "*.buildinfo" \
-              \) \
-              -print
-          '
-
-          sudo lxc file pull -r \
-            kernel-build/root/../ \
-            /tmp/kernel-output \
-            2>/dev/null || true
-
-          # Надёжнее собрать архив внутри контейнера.
-          sudo lxc exec kernel-build -- bash -c '
-            cd /root
-            mkdir -p /tmp/packages
-
-            find .. -maxdepth 1 -type f \
-              \( \
-                -name "*.deb" \
-                -o -name "*.changes" \
-                -o -name "*.buildinfo" \
-              \) \
-              -exec cp -v {} /tmp/packages/ \;
-
-            tar -C /tmp/packages -czf /tmp/kernel-packages.tar.gz .
-          '
-
-          sudo lxc file pull \
-            kernel-build/tmp/kernel-packages.tar.gz \
-            packages/kernel-packages.tar.gz
-
-          tar -xzf packages/kernel-packages.tar.gz \
-            -C packages
-
-          rm packages/kernel-packages.tar.gz
-
-          echo "=== PACKAGES ==="
-          find packages -type f -print | sort
+          echo "=== Packages to upload ==="
+          ls -lah packages
 
       - name: Upload Debian packages
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ubuntu-asahi-kernel-arm64
