@@ -8,83 +8,26 @@ permissions:
 
 jobs:
   build:
-    name: Build ARM64 kernel packages
     runs-on: ubuntu-24.04-arm
 
     env:
       DEBIAN_FRONTEND: noninteractive
-      DEB_BUILD_OPTIONS: parallel=4,nocheck
-      RUSTUP_HOME: /opt/rustup
-      CARGO_HOME: /opt/cargo
+      DEB_BUILD_OPTIONS: parallel=4
 
     steps:
-      - name: Checkout kernel
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: master
           fetch-depth: 1
-
-      - name: Show source version
-        run: |
-          echo "Commit:"
-          git log -1 --oneline
-
-          echo
-          echo "Kernel:"
-          make -s kernelversion
-
-          echo
-          echo "Debian flavour:"
-          cat debian/debian.env
-          echo
-          cat debian.asahi-arm/rules.d/arm64.mk
 
       - name: Enable source repositories
         run: |
           sudo sed -i \
             's/^Types: deb$/Types: deb deb-src/' \
             /etc/apt/sources.list.d/ubuntu.sources
-
           sudo apt-get update
 
-      - name: Install base build dependencies
-        run: |
-          sudo apt-get install -y \
-            build-essential \
-            fakeroot \
-            devscripts \
-            dpkg-dev \
-            debhelper \
-            bc \
-            bison \
-            flex \
-            gawk \
-            git \
-            rsync \
-            cpio \
-            kmod \
-            libssl-dev \
-            libelf-dev \
-            libdw-dev \
-            libncurses-dev \
-            dwarves \
-            pahole \
-            python3 \
-            python3-dev \
-            python3-setuptools \
-            python3-yaml \
-            pkg-config \
-            openssl \
-            xz-utils \
-            zstd \
-            lz4 \
-            ccache \
-            clang \
-            llvm \
-            lld
-
-      # Ubuntu 24.04 ships LLVM 18, while the current Ubuntu Asahi
-      # packaging expects LLVM/Clang 21.
       - name: Install LLVM 21
         run: |
           curl -fsSL https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh
@@ -94,116 +37,94 @@ jobs:
           sudo apt-get install -y \
             clang-21 \
             llvm-21 \
-            llvm-21-dev \
-            libclang-21-dev \
-            lld-21
+            llvm-21-dev
 
-          echo "/usr/lib/llvm-21/bin" >> "$GITHUB_PATH"
+      - name: Install build dependencies
+        run: |
+          sudo apt-get install -y \
+            autoconf \
+            automake \
+            bc \
+            bindgen \
+            bison \
+            bpftool \
+            cpio \
+            curl \
+            debhelper-compat \
+            default-jdk-headless \
+            dkms \
+            flex \
+            gawk \
+            java-common \
+            kmod \
+            libaudit-dev \
+            libbpf-dev \
+            libcap-dev \
+            libdebuginfod-dev \
+            libdw-dev \
+            libelf-dev \
+            libiberty-dev \
+            liblzma-dev \
+            libnewt-dev \
+            libnl-3-dev \
+            libnl-genl-3-dev \
+            libnuma-dev \
+            libpci-dev \
+            libssl-dev \
+            libstdc++-dev \
+            libtool \
+            libtraceevent-dev \
+            libtracefs-dev \
+            libudev-dev \
+            libunwind8-dev \
+            pahole \
+            pkg-config \
+            python3 \
+            python3-dev \
+            python3-setuptools \
+            rsync \
+            uuid-dev \
+            zstd
 
-          clang-21 --version
-          llvm-config-21 --version
-          ld.lld-21 --version
-
-      # The packaging requires rustc >= 1.82.
-      # Ubuntu 24.04's rustc is too old, so use rustup.
       - name: Install Rust
         run: |
-          sudo mkdir -p "$RUSTUP_HOME" "$CARGO_HOME"
-          sudo chown -R "$USER:$USER" "$RUSTUP_HOME" "$CARGO_HOME"
-
-          curl --proto '=https' \
-               --tlsv1.2 \
-               -sSf https://sh.rustup.rs \
-            | sh -s -- \
-                -y \
-                --default-toolchain stable \
-                --profile minimal
-
-          echo "$CARGO_HOME/bin" >> "$GITHUB_PATH"
-
-          "$CARGO_HOME/bin/rustc" --version
-          "$CARGO_HOME/bin/rustfmt" --version
-
-      - name: Install Rust build helpers
-        run: |
-          cargo install bindgen-cli --locked
-
-          echo
-          bindgen --version
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rust-src rustfmt
 
       - name: Generate Debian control
         run: |
           debian/rules debian/control
 
-          echo
-          echo "Build dependencies:"
-          sed -n '/^Build-Depends:/,/^[^ ]/p' debian/control || true
-
-      - name: Show Debian build environment
+      - name: Verify build dependencies
         run: |
-          dpkg --print-architecture
-          dpkg-architecture
+          dpkg-checkbuilddeps -B
 
-          echo
-          echo "gcc:"
-          gcc --version | head -n 1
-
-          echo
-          echo "clang:"
-          clang-21 --version | head -n 1
-
-          echo
-          echo "rustc:"
-          rustc --version
-
-          echo
-          echo "rustfmt:"
-          rustfmt --version
-
-          echo
-          echo "bindgen:"
-          bindgen --version
-
-      - name: Build Debian packages
+      - name: Build ARM64 Debian packages
         run: |
-          fakeroot debian/rules binary
+          fakeroot debian/rules binary-arch
 
-      - name: Show generated packages
+      - name: Show packages
         if: always()
         run: |
-          echo "Generated files:"
           find .. -maxdepth 1 -type f \
-            \( \
-              -name '*.deb' -o \
-              -name '*.changes' -o \
-              -name '*.buildinfo' -o \
-              -name '*.dsc' \
-            \) \
+            \( -name '*.deb' -o -name '*.changes' -o -name '*.buildinfo' \) \
             -print | sort
 
-      - name: Collect Debian packages
-        if: success()
+      - name: Collect packages
         run: |
           mkdir -p packages
 
           find .. -maxdepth 1 -type f \
-            \( \
-              -name '*.deb' -o \
-              -name '*.changes' -o \
-              -name '*.buildinfo' \
-              -o -name '*.dsc' \
-            \) \
+            \( -name '*.deb' -o -name '*.changes' -o -name '*.buildinfo' \) \
             -exec cp -v {} packages/ \;
 
-          echo
-          echo "Packages to upload:"
           ls -lah packages
 
       - name: Upload Debian packages
-        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-asahi-kernel-debs
+          name: ubuntu-asahi-kernel
           path: packages/
           if-no-files-found: error
           retention-days: 30
