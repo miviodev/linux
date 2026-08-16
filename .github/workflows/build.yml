@@ -83,7 +83,7 @@ jobs:
         run: |
           set -eux
 
-          mk-build-deps \
+          sudo mk-build-deps \
             --install \
             --remove \
             --tool='apt-get -y --no-install-recommends' \
