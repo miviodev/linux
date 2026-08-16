@@ -1,0 +1,53 @@
+name: Build Asahi kernel
+ 
+on:
+  workflow_dispatch:
+ 
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+ 
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android \
+            /usr/local/.ghcup /opt/hostedtoolcache
+          sudo apt-get clean
+          df -h
+ 
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fakeroot dpkg-dev build-essential libncurses-dev \
+            bison flex libssl-dev libelf-dev dwarves bc rsync kmod cpio devscripts \
+            equivs libudev-dev libtraceevent-dev libtracefs-dev libcpupower-dev \
+            libbpf-dev pkg-config
+          sudo mk-build-deps -i -t "apt-get -y --no-install-recommends" debian/control
+ 
+      - name: Patch macsmc power-off
+        run: |
+          grep -n "kernel_power_off()" drivers/input/misc/macsmc-hid.c
+          sed -i 's/kernel_power_off();/dev_crit(smchid->dev, "power-off suppressed for build");/' \
+            drivers/input/misc/macsmc-hid.c
+          grep -n "power-off suppressed" drivers/input/misc/macsmc-hid.c
+ 
+      - name: Build
+        run: |
+          fakeroot debian/rules clean
+          CONCURRENCY_LEVEL=4 fakeroot debian/rules binary-asahi-arm \
+            skipabi=true skipmodule=true skipdbg=true do_tools=false
+ 
+      - name: Build headers
+        run: |
+          CONCURRENCY_LEVEL=4 fakeroot debian/rules binary-headers \
+            skipabi=true skipmodule=true skipdbg=true
+ 
+      - name: List result
+        run: ls -la ../*.deb
+ 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-debs
+          path: ../*.deb
+          retention-days: 7
