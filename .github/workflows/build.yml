@@ -26,7 +26,7 @@ jobs:
             bison flex libssl-dev libelf-dev dwarves bc rsync kmod cpio devscripts \
             equivs libudev-dev libtraceevent-dev libtracefs-dev \
             libbpf-dev pkg-config
-          sudo mk-build-deps -i -t "apt-get -y --no-install-recommends" debian/control
+          sudo mk-build-deps debian/control -i
       - name: Patch macsmc power-off
         run: |
           grep -n "kernel_power_off()" drivers/input/misc/macsmc-hid.c
