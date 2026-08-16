@@ -28,11 +28,14 @@ jobs:
       DEB_BUILD_OPTIONS: parallel=4
 
     steps:
-      - name: Install git (needed for checkout inside minimal container)
+      - name: Install base tools (needed for checkout and env checks inside minimal container)
         run: |
           set -eux
           apt-get update
-          apt-get install -y --no-install-recommends git ca-certificates
+          apt-get install -y --no-install-recommends \
+            git \
+            ca-certificates \
+            dpkg-dev
 
       - name: Checkout
         uses: actions/checkout@v4
